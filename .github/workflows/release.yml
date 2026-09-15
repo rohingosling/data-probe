@@ -1,0 +1,155 @@
+# ------------------------------------------------------------------------------
+#  Workflow:    Data Probe Release
+#  Version:     1.5
+#  Author:      Rohin Gosling
+#  Environment: GitHub Actions
+#
+#  Description:
+#
+#    Publishes a GitHub release when a version tag (v*) is pushed.
+#
+#    Data Probe is built with Borland C++ 3.1 -- a proprietary, DOS-hosted
+#    toolchain that cannot run on a GitHub runner -- so this workflow compiles
+#    nothing. Instead it verifies that the published tree carries everything a
+#    consumer needs in order to build the project themselves under DOSBox, and
+#    then cuts the release.
+#
+#    GitHub attaches the source archives (zip and tar.gz) to every release
+#    automatically. Because this repository is the curated publish tree, those
+#    archives are already exactly the intended release payload. DPROBE.EXE is
+#    uploaded separately, from a local Borland build.
+#
+#  Usage:
+#
+#    git tag v1.5
+#    git push origin v1.5
+#
+# ------------------------------------------------------------------------------
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+
+  # ----------------------------------------------------------------------------
+  #  Verify that the published tree is complete and carries no local paths.
+  # ----------------------------------------------------------------------------
+
+  check:
+
+    name:    Verify published tree
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Check out the tagged tree
+        uses: actions/checkout@v4
+
+      - name: Verify the six build units are present
+        run: |
+          missing=0
+
+          for source_file in \
+            src/M-TEXT/mtext.c      src/M-TEXT/mtext.h      \
+            src/M-APP/mapp.cpp      src/M-APP/mapp.h        \
+            src/INI/ini.cpp         src/INI/ini.h           \
+            src/D-PROBE/hexview.cpp src/D-PROBE/hexview.h   \
+            src/D-PROBE/filebuf.cpp src/D-PROBE/filebuf.h   \
+            src/D-PROBE/dprobe.cpp  src/D-PROBE/dprobe.h
+          do
+            if [ -f "$source_file" ]; then
+              echo "  present : $source_file"
+            else
+              echo "  MISSING : $source_file"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo "Published tree is missing source files required by BUILD.BAT."
+            exit 1
+          fi
+
+      - name: Verify the build scripts are present
+        run: |
+          missing=0
+
+          for build_script in build/BUILD.BAT build/CLEAN.BAT
+          do
+            if [ -f "$build_script" ]; then
+              echo "  present : $build_script"
+            else
+              echo "  MISSING : $build_script"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo "Published tree is missing its DOS build scripts."
+            exit 1
+          fi
+
+      - name: Verify BUILD.BAT compiles every published unit
+        run: |
+          missing=0
+
+          for unit_name in mtext mapp ini hexview filebuf dprobe
+          do
+            if grep -qi "$unit_name\." build/BUILD.BAT; then
+              echo "  referenced : $unit_name"
+            else
+              echo "  UNBUILT    : $unit_name"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo "BUILD.BAT does not reference every published source unit."
+            exit 1
+          fi
+
+      - name: Verify no private-tree or local host paths leaked
+        run: |
+          # The private source tree is never published, so no published file may
+          # reference a path inside it, nor an authoring machine's drive layout.
+          # C++ "private:" cannot match -- the pattern requires a path separator.
+
+          if grep -r -n -I -E 'private[\\/]|X:\\|C:\\Users' \
+               --exclude-dir=.git --exclude-dir=.github . ; then
+            echo "Published tree references a private or local host path."
+            exit 1
+          fi
+
+          echo "  clean : no private-tree or local host paths found"
+
+  # ----------------------------------------------------------------------------
+  #  Cut the release.
+  # ----------------------------------------------------------------------------
+
+  release:
+
+    name:    Publish release
+    runs-on: ubuntu-latest
+    needs:   check
+
+    permissions:
+      contents: write
+
+    steps:
+
+      - name: Check out the tagged tree
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
